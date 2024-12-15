@@ -1,0 +1,11 @@
+{
+  "dependencies": {
+    "mocha": "^10.8.2",
+    "puppeteer": "^23.10.4",
+    "selenium-webdriver": "^4.27.0",
+    "xlsx": "^0.18.5"
+  },
+  "scripts": {
+    "test": "mocha main.spec.js"
+  }
+}

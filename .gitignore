@@ -1,0 +1,15 @@
+# Node.js
+node_modules/
+
+# Logs
+logs/
+*.log
+
+# Temporary files
+*.tmp
+
+# Environment variables
+.env
+
+# Database
+*.xlsx
