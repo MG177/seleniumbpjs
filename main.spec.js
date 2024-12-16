@@ -3,6 +3,7 @@ const { Builder, By, Key, until } = require("selenium-webdriver");
 const assert = require("assert");
 const fs = require("fs");
 const path = require("path");
+const xlsx = require("xlsx"); // Add xlsx library for Excel file handling
 
 /**
  * Write log message to multiple files while maintaining console.log
@@ -37,6 +38,19 @@ function writeLog(files, message) {
   });
 }
 
+// Function to convert Excel serial date to JavaScript Date object
+function excelSerialToDate(serialDate) {
+  if (serialDate === null || serialDate === undefined) {
+    return null;
+  }
+  const date = new Date(Math.round((serialDate - 25569) * 86400 * 1000));
+  return date.toLocaleDateString("en-GB", {
+    day: "2-digit",
+    month: "2-digit",
+    year: "numeric",
+  });
+}
+
 describe("tes1", function () {
   this.timeout(0); // Set Mocha's timeout for test cases
   let driver;
@@ -46,72 +60,209 @@ describe("tes1", function () {
     vars = {};
   });
   afterEach(async function () {
-    await driver.sleep(120000); // 2 minutes
     await driver.quit();
   });
   it("tes1", async function () {
-    console.log("Mengakses halaman skrining");
-    await driver.get("https://webskrining.bpjs-kesehatan.go.id/skrining");
-    await driver.manage().window().setRect({ width: 866, height: 1025 });
+    // Load Excel file
+    const filePath = "C:\\Users\\Lenovo\\Downloads\\memeysel.xlsx"; // Update with your Excel file path
+    const workbook = xlsx.readFile(filePath);
+    const sheetName = workbook.SheetNames[0];
+    const data = xlsx.utils.sheet_to_json(workbook.Sheets[sheetName]);
 
-    console.log("Memasukkan NIK");
-    writeLog("logs/test.log", "Memasukkan NIK");
-    await driver.findElement(By.id("nik_txt")).click();
-    await driver.findElement(By.id("nik_txt")).sendKeys("0000910424496");
+    for (const row of data) {
+      try {
+        writeLog("logs/main.log", `Start NIK: ${row["NIK"]}`);
 
-    console.log("Memasukkan tanggal lahir");
-    writeLog("logs/test.log", "Memasukkan tanggal lahir");
-    await driver.findElement(By.id("TglLahir_src")).click();
-    await driver.findElement(By.id("TglLahir_src")).sendKeys("28-11-2004");
+        // Retry navigation if it fails
+        async function retryOperation(operation, retries = 3) {
+          try {
+            await operation();
+          } catch (error) {
+            if (retries > 0) {
+              await driver.sleep(1000); // Wait 1 second before retrying
+              await retryOperation(operation, retries - 1);
+            } else {
+              throw error;
+            }
+          }
+        }
 
-    await driver.findElement(By.id("TglLahir_src")).sendKeys(Key.ESCAPE);
+        await retryOperation(async () => {
+          await driver.get("https://webskrining.bpjs-kesehatan.go.id/skrining");
+          await driver.manage().window().setRect({ width: 866, height: 1025 });
+        });
 
-    console.log("Waiting for captcha");
-    await driver.findElement(By.id("captchaCode_txt")).click();
+        // Tunggu elemen NIK muncul
+        await retryOperation(async () => {
+          await driver.findElement(By.id("nik_txt")).click();
+        });
 
-    let inputCaptcha = await driver
-      .findElement(By.id("captchaCode_txt"))
-      .getAttribute("value");
-    let startTime = Date.now();
-    let timeElapsed = 0;
-    while (inputCaptcha.length < 5 && timeElapsed < 7000) {
-      await driver.sleep(200);
-      inputCaptcha = await driver
-        .findElement(By.id("captchaCode_txt"))
-        .getAttribute("value");
-      console.log(inputCaptcha, Date.now() - startTime);
+        console.log(row["TGLLHR"]);
+        console.log(row["NIK"]);
+        console.log(excelSerialToDate(row["TGLLHR"]));
+
+        // Isi NIK
+        await driver.findElement(By.id("nik_txt")).sendKeys(row["NIK"]); // Use NIK from Excel
+
+        // Isi tanggal lahir
+        const tanggalLahir = excelSerialToDate(row["TGLLHR"]);
+
+        if (!tanggalLahir) {
+          console.error("Gagal memproses tanggal lahir untuk NIK:", row["NIK"]);
+          continue; // Skip ke data berikutnya jika tanggal tidak valid
+        }
+        await driver.findElement(By.id("TglLahir_src")).sendKeys(tanggalLahir); // Use date from Excel
+
+        await driver.findElement(By.id("TglLahir_src")).sendKeys(Key.ESCAPE);
+
+        console.log("Waiting for captcha");
+        await driver.findElement(By.id("captchaCode_txt")).click();
+
+        let inputCaptcha = await driver
+          .findElement(By.id("captchaCode_txt"))
+          .getAttribute("value");
+        let startTime = Date.now();
+        let timeElapsed = 0;
+        while (inputCaptcha.length < 5 && timeElapsed < 7000) {
+          await driver.sleep(200);
+          inputCaptcha = await driver
+            .findElement(By.id("captchaCode_txt"))
+            .getAttribute("value");
+          console.log(inputCaptcha, Date.now() - startTime);
+        }
+
+        console.log("Click login");
+        await driver.findElement(By.id("btnCariPetugas")).click();
+
+        // Check for both elements using findElements with wait
+        const successButtons = await driver.wait(
+          until.elementsLocated(
+            By.css(
+              "body > div.bootbox.modal.fade.bootbox-confirm.in > div > div > div.modal-footer > button.btn.btn-success"
+            )
+          ),
+          1500
+        );
+
+        const hasilElements = await driver.findElements(
+          By.id("hasilSkrJudul_Top")
+        );
+
+        console.log(
+          "Found success buttons:",
+          successButtons.length,
+          successButtons
+        );
+        console.log(
+          "Found hasil elements:",
+          hasilElements.length,
+          hasilElements
+        );
+
+        if (hasilElements.length > 0 && successButtons.length == 0) {
+          // Found hasil skrining, log and continue to next iteration
+          const hasilText = await hasilElements[0].getText();
+          writeLog("logs/main.log", `Hasil skrining ditemukan: ${row["NIK"]}`);
+          writeLog(
+            "logs/done.log",
+            `Finished (Already filled before)  : ${row["NIK"]}`
+          );
+          console.log("Hasil skrining ditemukan:", hasilText);
+          done();
+          continue;
+        }
+
+        if (successButtons.length > 0) {
+          await driver.executeScript(
+            "arguments[0].click();",
+            successButtons[0]
+          );
+          console.log("Clicked .btn-success, continuing with form");
+        } else {
+          console.log("No elements found, continuing with form");
+        }
+
+        console.log("Memasukkan berat badan");
+        await driver.findElement(By.id("beratBadan_txt")).click();
+        await driver.findElement(By.id("beratBadan_txt")).sendKeys("60");
+
+        console.log("Memasukkan tinggi badan");
+        await driver.findElement(By.id("tinggiBadan_txt")).sendKeys("160");
+
+        await driver.findElement(By.id("nextGenBtn")).click();
+
+        // Function to handle answering questions and clicking next
+        async function handleQuestionSet(driver, delayBetweenClicks = 0) {
+          await driver.wait(
+            until.elementsLocated(
+              By.css(".answer-item:nth-child(2) > .answertext")
+            ),
+            5000
+          );
+
+          const elements = await driver.findElements(
+            By.css(".answer-item:nth-child(2) > .answertext")
+          );
+          console.log(`Found ${elements.length} questions to answer`);
+
+          for (const element of elements) {
+            await driver.executeScript("arguments[0].click();", element);
+            if (delayBetweenClicks > 0) {
+              await driver.sleep(delayBetweenClicks);
+            }
+            console.log("Answered a question");
+          }
+
+          await driver.findElement(By.id("nextGenBtn")).click();
+        }
+
+        // Handle all question sets
+        let attempts = 0;
+
+        while (true) {
+          let saveButton;
+          try {
+            saveButton = await driver.findElement(
+              By.xpath("/html/body/div[6]/div/div/div[3]/button[2]")
+            );
+            // If found, proceed with clicking
+            await driver.executeScript("arguments[0].click();", saveButton);
+            console.log("Clicked save button, form completed");
+            break;
+          } catch (error) {
+            console.log("Save button not found, continuing...");
+            await handleQuestionSet(driver);
+            attempts++;
+          }
+        }
+
+        writeLog("logs/main.log", `Hasil skrining selesai: ${row["NIK"]}`);
+        writeLog(
+          "logs/done.log",
+          `Finished (Passed all proccess)  : ${row["NIK"]}`
+        );
+        done();
+      } catch (error) {
+        if (error.message.includes("no such window")) {
+          writeLog(
+            "logs/main.log",
+            `Error: ${row["NIK"]} ~ Chrome driver has exited. Stopping execution.`
+          );
+          console.error("Error processing data for NIK:", row["NIK"], error);
+          writeLog(
+            "logs/failed.log",
+            `Failed  : ${row["NIK"]} ~ ${error.message}`
+          );
+
+          break; // Exit the loop
+        }
+
+        console.error("Error processing data for NIK:", row["NIK"], error);
+        writeLog(
+          "logs/failed.log",
+          `Failed  : ${row["NIK"]} ~ ${error.message}`
+        );
+      }
     }
-
-    console.log("Click login");
-    await driver.findElement(By.id("btnCariPetugas")).click();
-
-    // Explicit wait to locate the .btn-success element
-    try {
-      const petugasButton = await driver.wait(
-        until.elementLocated(By.css(".btn-success")), // Wait for the element
-        60000 // Timeout of 60 seconds
-      );
-      await driver.wait(
-        until.elementIsVisible(petugasButton), // Ensure the element is visible
-        60000 // Timeout of 60 seconds
-      );
-      await petugasButton.click(); // Click the element
-    } catch (err) {
-      console.error("Error locating or clicking the .btn-success button:", err);
-      throw err; // Rethrow the error for debugging purposes
-    }
-
-    console.log("Memasukkan berat badan");
-    await driver.findElement(By.id("beratBadan_txt")).click();
-    await driver.findElement(By.id("beratBadan_txt")).sendKeys("60");
-
-    console.log("Memasukkan tinggi badan");
-    await driver.findElement(By.id("tinggiBadan_txt")).sendKeys("160");
-
-    console.log("Memasukkan nomor HP");
-    await driver.findElement(By.id("nohp_txt")).click();
-
-    console.log("Click Next (enter form page)");
-    await driver.findElement(By.id("nextGenBtn")).click();
   });
 });
