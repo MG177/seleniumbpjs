@@ -1,5 +1,7 @@
 {
   "dependencies": {
+    "chromedriver": "^131.0.3",
+    "json2csv": "^6.0.0-alpha.2",
     "mocha": "^10.8.2",
     "puppeteer": "^23.10.4",
     "selenium-webdriver": "^4.27.0",
