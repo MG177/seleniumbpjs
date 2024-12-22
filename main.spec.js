@@ -110,12 +110,7 @@ function excelSerialToDate(serialDate) {
 }
 
 // Retry logic for retryable operations
-async function retryOperation(
-  driver,
-  operation,
-  step = "Unknown",
-  retries = 3
-) {
+async function retryOperation(driver, operation, retries = 1) {
   let attempt = 0;
   while (attempt < retries) {
     try {
@@ -146,47 +141,60 @@ async function handleCaptcha(driver) {
     inputCaptcha = await driver
       .findElement(By.id("captchaCode_txt"))
       .getAttribute("value");
-    console.log(inputCaptcha, Date.now() - startTime);
   }
 }
 
 // Function to handle login and success check
 async function handleLogin(driver, row) {
-  console.log("Click login");
-  await driver.findElement(By.id("btnCariPetugas")).click();
-
   try {
-    // First try to find and click success button
-    await driver.sleep(1000); // Wait for 1 second
-    const successButtons = await driver.findElements(
-      By.xpath("//button[contains(text(),'Setuju')]")
-    );
+    console.log("Click login");
+    await driver.findElement(By.id("btnCariPetugas")).click();
 
-    if (successButtons.length > 0) {
-      await driver.wait(until.elementIsVisible(successButtons[0]), 5000);
-      await successButtons[0].click();
+    // Wait for any success buttons to appear with timeout
+    try {
+      await driver.wait(
+        async () => {
+          const successButtons = await driver.findElements(
+            By.xpath("//button[contains(text(),'Setuju')]")
+          );
+          console.log("Found success buttons:", successButtons.length);
+
+          if (successButtons.length > 0) {
+            await driver.wait(until.elementIsVisible(successButtons[0]), 2000);
+            await successButtons[0].click();
+            console.log("Click success button");
+            return true;
+          }
+          return false;
+        },
+        5000,
+        "Timeout waiting for success button"
+      );
+
+      // If success button was found and clicked
+      logCompletion(row, "Filled before");
+      return false;
+    } catch (successError) {
+      // If no success button found, try back button
+      await driver.executeScript(
+        "window.scrollTo(0, document.body.scrollHeight);"
+      );
+      const backButton = await driver.wait(
+        until.elementLocated(By.id("btnBacktoHome1")),
+        5000,
+        "Timeout waiting for back button"
+      );
+      await driver.sleep(1000);
+      await backButton.click();
+      console.log("Click back button");
+
+      logCompletion(row, "Filled before");
+      console.log("Screening successful, found back button");
       return false;
     }
-
-    // If no success button, try back button
-    await driver.executeScript(
-      "window.scrollTo(0, document.body.scrollHeight);"
-    );
-    console.log("Click back button");
-
-    const backButton = await driver.findElement(By.id("btnBacktoHome1"));
-
-    console.log("Found back button:", backButton);
-
-    await driver.wait(until.elementIsVisible(backButton), 5000);
-    await driver.wait(until.elementIsEnabled(backButton), 5000);
-
-    logCompletion(row, "Filled before");
-    console.log("Screening successful, found back button");
-    return true;
   } catch (error) {
-    console.log("Error in handling result:", error.message);
-    return false;
+    console.log("No success/back button found, proceeding with login", error);
+    return true;
   }
 }
 
@@ -228,8 +236,8 @@ async function submitForm(driver) {
       saveButton = await driver.findElement(
         By.xpath("//button[contains(text(),'Setuju')]")
       );
-      // await driver.executeScript("arguments[0].click();", saveButton);
-      await saveButton.click();
+      await driver.executeScript("arguments[0].click();", saveButton);
+      // await saveButton.click();
       console.log("Clicked save button, form completed");
       break;
     } catch (error) {
@@ -297,92 +305,96 @@ describe("4 Sessions Layout Test", function () {
         });
         drivers.push(driver);
       }
+    } else if (sessionState === 2) {
+      const size = { width: 1280 / scaleFactor, height: 800 / scaleFactor };
+      for (let i = 0; i < 2; i++) {
+        const driver = await new Builder().forBrowser("chrome").build();
+        await driver.manage().window().setRect({
+          width: size.width,
+          height: size.height,
+          x: positions[i].x,
+          y: positions[i].y,
+        });
+        drivers.push(driver);
+      }
     }
   });
 
   afterEach(async function () {
-    // Quit all 4 drivers
-    for (let driver of drivers) {
+    for (const driver of drivers) {
       await driver.quit();
     }
   });
 
-  it("Should Process Each NIK", async function () {
+  it("should fill the form", async function () {
     const workbook = xlsx.readFile("memeysel.xlsx");
     const worksheet = workbook.Sheets[workbook.SheetNames[0]];
-    const rows = xlsx.utils.sheet_to_json(worksheet);
+    const data = xlsx.utils.sheet_to_json(worksheet);
 
-    const url = "https://webskrining.bpjs-kesehatan.go.id/skrining";
+    // Read success log to get processed NIKs
+    let processedNIKs = new Set();
+    try {
+      const successLog = JSON.parse(
+        fs.readFileSync("./logs/json/success_log.json", "utf8")
+      );
+      processedNIKs = new Set(successLog.map((entry) => entry.NIK));
+    } catch (error) {
+      console.log(
+        "No existing success log found or error reading it:",
+        error.message
+      );
+    }
 
-    const operations = drivers.map(async (driver, driverIndex) => {
-      for (const row of rows) {
+    let currentIndex = 0;
+    const totalSessions = sessionState === 2 ? 2 : sessionState === 4 ? 4 : 1;
+    const promises = [];
+
+    while (currentIndex < data.length) {
+      const sessionPromises = drivers.map(async (driver, sessionIndex) => {
+        const dataIndex = currentIndex + sessionIndex;
+        if (dataIndex >= data.length) return; // Skip if we've processed all data
+
+        const row = data[dataIndex];
+
+        // Skip if NIK is already processed
+        if (processedNIKs.has(row.NIK)) {
+          console.log(`Skipping already processed NIK: ${row.NIK}`);
+          return;
+        }
+
         try {
-          // Skip if NIK already processed
-          const successLogPath = "logs/json/success_log.json";
-          if (fs.existsSync(successLogPath)) {
-            const fileContent = fs.readFileSync(successLogPath, "utf-8");
-            if (fileContent.trim()) {
-              const successLog = JSON.parse(fileContent);
-              if (successLog.some((item) => item.NIK === row["NIK"])) {
-                console.log(
-                  `Skipping NIK ${row["NIK"]} (Driver ${driverIndex + 1})`
-                );
-                continue;
-              }
+          await retryOperation(driver, async () => {
+            const url = "https://webskrining.bpjs-kesehatan.go.id/skrining";
+            await driver.get(url);
+
+            const tanggalLahir = await processNIKandTGLLHR(driver, row);
+            if (!tanggalLahir) {
+              throw new Error("Failed to process NIK and TGLLHR");
             }
-          }
 
-          const result = await retryOperation(
-            driver,
-            async () => {
-              const step = "";
-              await driver.get(url);
-              const tanggalLahir = await processNIKandTGLLHR(driver, row);
-              if (!tanggalLahir) {
-                throw new Error("Failed to process NIK and TGLLHR");
-              }
+            await handleCaptcha(driver);
+            const loginSuccess = await handleLogin(driver, row);
+            if (loginSuccess) return true;
 
-              try {
-                await handleCaptcha(driver);
-              } catch (error) {
-                throw new Error(`Captcha handling failed: ${error}`);
-              }
+            await fillOutForm(driver);
+            await submitForm(driver);
 
-              try {
-                const loginSuccess = await handleLogin(driver, row);
-                if (loginSuccess) return true;
-              } catch (error) {
-                throw new Error(`Login process failed: ${error}`);
-              }
-
-              try {
-                await fillOutForm(driver);
-              } catch (error) {
-                throw new Error(`Form filling failed: ${error}`);
-              }
-
-              try {
-                await submitForm(driver);
-              } catch (error) {
-                throw new Error(`Form submission failed: ${error}`);
-              }
-
-              logCompletion(row);
-              return true;
-            },
-            "Process Flow"
-          );
-
-          if (result) continue;
+            logCompletion(row);
+            return true;
+          });
         } catch (error) {
           const step = error.message.includes("Step:")
             ? error.message.split("Step:")[1].trim().replace(")", "")
             : "Unknown";
-          logFailure(row, error.message.split("(Step:")[0].trim(), step);
+          await logFailure(row, error.message, step);
         }
-      }
-    });
+      });
 
-    await Promise.all(operations); // Wait for all drivers to process their tasks concurrently
+      promises.push(...sessionPromises);
+      currentIndex += totalSessions; // Increment by number of sessions
+      await Promise.all(sessionPromises); // Wait for current batch to complete
+    }
+
+    await Promise.all(promises);
   });
 });
