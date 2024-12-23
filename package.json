@@ -8,6 +8,12 @@
     "xlsx": "^0.18.5"
   },
   "scripts": {
-    "test": "mocha main.spec.js"
+    "test": "mocha main.spec.js",
+    "run1": "mocha main_session1.spec.js",
+    "run2": "mocha main_session2.spec.js",
+    "run3": "mocha main_session3.spec.js",
+    "run4": "mocha main_session4.spec.js",
+    "run-all": "start npm run run1 && start npm run run2 && start npm run run3 && start npm run run4",
+    "count": "node count.js"
   }
 }

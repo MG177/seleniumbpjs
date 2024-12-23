@@ -3,7 +3,7 @@ const assert = require("assert");
 const fs = require("fs");
 const path = require("path");
 const xlsx = require("xlsx");
-const { parse } = require("json2csv"); // CSV conversion
+const { parse } = require("json2csv");
 
 // Helper function to write logs to JSON and CSV files
 function writeLogToJsonAndCsv(logType, logData) {
@@ -150,32 +150,47 @@ async function handleLogin(driver, row) {
     console.log("Click login");
     await driver.findElement(By.id("btnCariPetugas")).click();
 
-    // Wait for any success buttons to appear with timeout
+    // Wait for and handle success button
     try {
       await driver.wait(
         async () => {
-          const successButtons = await driver.findElements(
-            By.xpath("//button[contains(text(),'Setuju')]")
-          );
-          console.log("Found success buttons:", successButtons.length);
+          try {
+            // Find success buttons with a more specific XPath
+            const successButtons = await driver.findElements(
+              By.xpath("//button[contains(text(),'Setuju')]")
+            );
 
-          if (successButtons.length > 0) {
-            await driver.wait(until.elementIsVisible(successButtons[0]), 2000);
-            await successButtons[0].click();
-            console.log("Click success button");
-            return true;
+            if (successButtons.length > 0) {
+              const button = successButtons[0];
+
+              // Wait for button to be both visible and clickable
+              await driver.wait(until.elementIsVisible(button), 2000);
+
+              // Try multiple click methods in case one fails
+              try {
+                await button.click();
+              } catch (clickError) {
+                console.log("Direct click failed, trying JavaScript click");
+                await driver.executeScript("arguments[0].click();", button);
+              }
+
+              console.log("Successfully clicked success button");
+              return true;
+            }
+            return false;
+          } catch (innerError) {
+            console.log("Error in button check iteration:", innerError.message);
+            return false;
           }
-          return false;
         },
         5000,
-        "Timeout waiting for success button"
+        "Timeout waiting for success button to be clickable"
       );
 
-      // If success button was found and clicked
-      logCompletion(row, "Filled before");
-      return false;
+      return true;
     } catch (successError) {
       // If no success button found, try back button
+      logCompletion(row, successError.message);
       await driver.executeScript(
         "window.scrollTo(0, document.body.scrollHeight);"
       );
@@ -273,128 +288,227 @@ function logFailure(row, errorMessage, step = "Unknown") {
   });
 }
 
-describe("4 Sessions Layout Test", function () {
-  this.timeout(0); // Set Mocha's timeout for test cases
+// Export all helper functions
+module.exports = {
+  writeLogToJsonAndCsv,
+  processNIKandTGLLHR,
+  excelSerialToDate,
+  retryOperation,
+  handleCaptcha,
+  handleLogin,
+  fillOutForm,
+  handleQuestionSet,
+  submitForm,
+  logCompletion,
+  logFailure,
+};
 
-  let drivers = [];
-  const sessionState = 4; // Set to 1 for a single session, 4 for multiple sessions
+// Only run the test suite if this file is being run directly
+if (require.main === module) {
+  describe("4 Sessions Layout Test", function () {
+    this.timeout(0);
 
-  beforeEach(async function () {
-    drivers = [];
+    let drivers = [];
+    const sessionState = 4;
+    const maxRetries = 3;
+    const batchSize = 20; // Process data in batches
+    let activeSessionCount = 0;
+    const sessionHealthChecks = new Map();
 
-    const scaleFactor = 1.5;
-    const positions = [
-      { x: 0, y: 0 },
-      { x: 1280 / scaleFactor, y: 0 },
-      { x: 0, y: 800 / scaleFactor },
-      { x: 1280 / scaleFactor, y: 800 / scaleFactor },
-    ];
+    // Helper function to check session health
+    async function isSessionHealthy(driver) {
+      try {
+        await driver.getCurrentUrl();
+        return true;
+      } catch {
+        return false;
+      }
+    }
 
-    if (sessionState === 1) {
+    // Helper function to create a new session
+    async function createSession(position, size) {
       const driver = await new Builder().forBrowser("chrome").build();
-      drivers.push(driver);
-    } else if (sessionState === 4) {
+      await driver.manage().window().setRect({
+        width: size.width,
+        height: size.height,
+        x: position.x,
+        y: position.y,
+      });
+      activeSessionCount++;
+      sessionHealthChecks.set(driver, { lastCheck: Date.now(), healthy: true });
+      return driver;
+    }
+
+    beforeEach(async function () {
+      drivers = [];
+      activeSessionCount = 0;
+      sessionHealthChecks.clear();
+
+      const scaleFactor = 1.5;
+      const positions = [
+        { x: 0, y: 0 },
+        { x: 1280 / scaleFactor, y: 0 },
+        { x: 0, y: 800 / scaleFactor },
+        { x: 1280 / scaleFactor, y: 800 / scaleFactor },
+      ];
       const size = { width: 1280 / scaleFactor, height: 800 / scaleFactor };
-      for (let i = 0; i < 4; i++) {
-        const driver = await new Builder().forBrowser("chrome").build();
-        await driver.manage().window().setRect({
-          width: size.width,
-          height: size.height,
-          x: positions[i].x,
-          y: positions[i].y,
-        });
+
+      // Initialize sessions based on sessionState
+      const sessionsToCreate =
+        sessionState === 1 ? 1 : sessionState === 2 ? 2 : 4;
+      for (let i = 0; i < sessionsToCreate; i++) {
+        const driver = await createSession(positions[i], size);
         drivers.push(driver);
       }
-    } else if (sessionState === 2) {
-      const size = { width: 1280 / scaleFactor, height: 800 / scaleFactor };
-      for (let i = 0; i < 2; i++) {
-        const driver = await new Builder().forBrowser("chrome").build();
-        await driver.manage().window().setRect({
-          width: size.width,
-          height: size.height,
-          x: positions[i].x,
-          y: positions[i].y,
-        });
-        drivers.push(driver);
-      }
-    }
-  });
+    });
 
-  afterEach(async function () {
-    for (const driver of drivers) {
-      await driver.quit();
-    }
-  });
-
-  it("should fill the form", async function () {
-    const workbook = xlsx.readFile("memeysel.xlsx");
-    const worksheet = workbook.Sheets[workbook.SheetNames[0]];
-    const data = xlsx.utils.sheet_to_json(worksheet);
-
-    // Read success log to get processed NIKs
-    let processedNIKs = new Set();
-    try {
-      const successLog = JSON.parse(
-        fs.readFileSync("./logs/json/success_log.json", "utf8")
-      );
-      processedNIKs = new Set(successLog.map((entry) => entry.NIK));
-    } catch (error) {
-      console.log(
-        "No existing success log found or error reading it:",
-        error.message
-      );
-    }
-
-    let currentIndex = 0;
-    const totalSessions = sessionState === 2 ? 2 : sessionState === 4 ? 4 : 1;
-    const promises = [];
-
-    while (currentIndex < data.length) {
-      const sessionPromises = drivers.map(async (driver, sessionIndex) => {
-        const dataIndex = currentIndex + sessionIndex;
-        if (dataIndex >= data.length) return; // Skip if we've processed all data
-
-        const row = data[dataIndex];
-
-        // Skip if NIK is already processed
-        if (processedNIKs.has(row.NIK)) {
-          console.log(`Skipping already processed NIK: ${row.NIK}`);
-          return;
-        }
-
+    afterEach(async function () {
+      for (const driver of drivers) {
         try {
-          await retryOperation(driver, async () => {
-            const url = "https://webskrining.bpjs-kesehatan.go.id/skrining";
-            await driver.get(url);
+          await driver.quit();
+        } catch (error) {
+          console.error("Error closing session:", error);
+        }
+      }
+      drivers = [];
+      activeSessionCount = 0;
+      sessionHealthChecks.clear();
+    });
 
-            const tanggalLahir = await processNIKandTGLLHR(driver, row);
-            if (!tanggalLahir) {
-              throw new Error("Failed to process NIK and TGLLHR");
+    it("should fill the form", async function () {
+      const workbook = xlsx.readFile("memeysel.xlsx");
+      const worksheet = workbook.Sheets[workbook.SheetNames[0]];
+      const data = xlsx.utils.sheet_to_json(worksheet);
+
+      // Read success log to get processed NIKs
+      let processedNIKs = new Set();
+      try {
+        const successLog = JSON.parse(
+          fs.readFileSync("./logs/json/success_log.json", "utf8")
+        );
+        processedNIKs = new Set(successLog.map((entry) => entry.NIK));
+      } catch (error) {
+        console.log(
+          "No existing success log found or error reading it:",
+          error.message
+        );
+      }
+
+      // Process data in batches
+      for (
+        let batchStart = 0;
+        batchStart < data.length;
+        batchStart += batchSize
+      ) {
+        const batchEnd = Math.min(batchStart + batchSize, data.length);
+        const currentBatch = data.slice(batchStart, batchEnd);
+        console.log(
+          `Processing batch ${batchStart / batchSize + 1}, entries ${
+            batchStart + 1
+          } to ${batchEnd}`
+        );
+
+        let currentIndex = 0;
+        const totalSessions = drivers.length;
+
+        while (currentIndex < currentBatch.length) {
+          // Check and recover unhealthy sessions
+          for (let i = 0; i < drivers.length; i++) {
+            const driver = drivers[i];
+            const healthCheck = sessionHealthChecks.get(driver);
+
+            if (Date.now() - healthCheck.lastCheck > 60000) {
+              // Check every minute
+              const healthy = await isSessionHealthy(driver);
+              sessionHealthChecks.set(driver, {
+                lastCheck: Date.now(),
+                healthy,
+              });
+
+              if (!healthy) {
+                console.log(`Recovering unhealthy session ${i + 1}`);
+                try {
+                  await driver.quit();
+                } catch {}
+                const scaleFactor = 1.5;
+                const position = {
+                  x: (i % 2) * (1280 / scaleFactor),
+                  y: Math.floor(i / 2) * (800 / scaleFactor),
+                };
+                const size = {
+                  width: 1280 / scaleFactor,
+                  height: 800 / scaleFactor,
+                };
+                drivers[i] = await createSession(position, size);
+              }
+            }
+          }
+
+          const sessionPromises = drivers.map(async (driver, sessionIndex) => {
+            const dataIndex = currentIndex + sessionIndex;
+            if (dataIndex >= currentBatch.length) return;
+
+            const row = currentBatch[dataIndex];
+            if (processedNIKs.has(row.NIK)) {
+              console.log(`Skipping already processed NIK: ${row.NIK}`);
+              return;
             }
 
-            await handleCaptcha(driver);
-            const loginSuccess = await handleLogin(driver, row);
-            if (loginSuccess) return true;
+            let retryCount = 0;
+            while (retryCount < maxRetries) {
+              try {
+                await retryOperation(driver, async () => {
+                  const url =
+                    "https://webskrining.bpjs-kesehatan.go.id/skrining";
+                  await driver.get(url);
 
-            await fillOutForm(driver);
-            await submitForm(driver);
+                  const tanggalLahir = await processNIKandTGLLHR(driver, row);
+                  if (!tanggalLahir)
+                    throw new Error("Failed to process NIK and TGLLHR");
 
-            logCompletion(row);
-            return true;
+                  await handleCaptcha(driver);
+                  const loginSuccess = await handleLogin(driver, row);
+                  if (loginSuccess) return;
+
+                  await fillOutForm(driver);
+                  await submitForm(driver);
+
+                  logCompletion(row);
+                  processedNIKs.add(row.NIK);
+                  return true;
+                });
+                break; // Success, exit retry loop
+              } catch (error) {
+                retryCount++;
+                const step = error.message.includes("Step:")
+                  ? error.message.split("Step:")[1].trim().replace(")", "")
+                  : "Unknown";
+
+                if (retryCount === maxRetries) {
+                  await logFailure(
+                    row,
+                    `Failed after ${maxRetries} attempts: ${error.message}`,
+                    step
+                  );
+                } else {
+                  console.log(
+                    `Attempt ${retryCount}/${maxRetries} failed for NIK ${row.NIK}: ${error.message}`
+                  );
+                  await new Promise((resolve) =>
+                    setTimeout(resolve, 2000 * retryCount)
+                  ); // Exponential backoff
+                }
+              }
+            }
           });
-        } catch (error) {
-          const step = error.message.includes("Step:")
-            ? error.message.split("Step:")[1].trim().replace(")", "")
-            : "Unknown";
-          await logFailure(row, error.message, step);
+
+          await Promise.all(sessionPromises);
+          currentIndex += totalSessions;
         }
-      });
 
-      promises.push(...sessionPromises);
-      currentIndex += totalSessions; // Increment by number of sessions
-      await Promise.all(sessionPromises); // Wait for current batch to complete
-    }
-
-    await Promise.all(promises);
+        // Small delay between batches to prevent overload
+        await new Promise((resolve) => setTimeout(resolve, 2000));
+      }
+    });
   });
-});
+}
